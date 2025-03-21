@@ -119,7 +119,11 @@ This platform uses real-time Twitter data rather than pre-packaged sentiment dat
 - Develop automated trading strategies based on sentiment signals
 - Expand to more cryptocurrencies and alternative data sources
 
+## Developer
 
+Vatsal Gagankumar Mehta
+
+*Developed as a showcase of end-to-end machine learning capabilities for data science portfolio*
 
 ## License
 
