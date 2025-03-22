@@ -1,4 +1,4 @@
-import tweepy
+import asyncio
 import pandas as pd
 import numpy as np
 import time
@@ -6,22 +6,28 @@ import os
 from nltk.sentiment.vader import SentimentIntensityAnalyzer
 import datetime
 from tqdm import tqdm
+from twscrape import API, gather
+from twscrape.logger import set_log_level
 
-class TwitterSentimentAnalyzer:
+
+class TwscrapeTwitterSentimentAnalyzer:
     """
-    Class for analyzing cryptocurrency sentiment from Twitter data.
-    Uses VADER for sentiment analysis and Twitter API v2 for data retrieval.
+    Class for analyzing cryptocurrency sentiment from Twitter data using Twscrape.
+    Uses VADER for sentiment analysis and Twscrape for data retrieval.
     """
     
-    def __init__(self, bearer_token, raw_data_path='data/raw'):
+    def __init__(self, raw_data_path='data/raw'):
         """
         Initialize the Twitter sentiment analyzer.
         
         Args:
-            bearer_token (str): Twitter API v2 bearer token
             raw_data_path (str): Path to raw data directory containing coin CSV files
         """
-        self.client = tweepy.Client(bearer_token=bearer_token)
+        # Disable excessive logging from twscrape
+        set_log_level("ERROR")
+        
+        # Initialize twscrape API
+        self.api = API()
         self.analyzer = SentimentIntensityAnalyzer()
         self.request_count = 0
         self.last_request_time = None
@@ -118,26 +124,44 @@ class TwitterSentimentAnalyzer:
         
         return coin_map
     
-    def _respect_rate_limit(self):
-        """Simple rate limiting to avoid 429 errors"""
-        # Twitter free tier allows ~300 requests per 15 min window = ~1 request per 3 seconds
-        # We'll be more conservative with 1 request per 5 seconds
-        if self.last_request_time:
-            elapsed = time.time() - self.last_request_time
-            if elapsed < 5:  # Wait at least 5 seconds between requests
-                time.sleep(5 - elapsed)
-        
-        self.last_request_time = time.time()
-        self.request_count += 1
-    
-    def get_crypto_sentiment(self, coin_symbol, max_results=100, days_back=7):
+    async def add_twitter_account(self, username, password, email=None, email_password=None):
         """
-        Get sentiment for a cryptocurrency from Twitter.
+        Add a Twitter account to the API pool for better rate limits.
+        This step is optional but recommended for better performance.
+        
+        Args:
+            username (str): Twitter username
+            password (str): Twitter password
+            email (str, optional): Email associated with Twitter account
+            email_password (str, optional): Email password
+            
+        Returns:
+            bool: True if successful, False otherwise
+        """
+        try:
+            if email and email_password:
+                # Add account with email for handling challenges
+                await self.api.pool.add_account(username, password, email, email_password)
+            else:
+                # Add basic account
+                await self.api.pool.add_account(username, password)
+            
+            # Try to login
+            await self.api.pool.login_all()
+            print(f"Successfully added Twitter account: {username}")
+            return True
+        except Exception as e:
+            print(f"Error adding Twitter account: {e}")
+            return False
+    
+    async def get_crypto_sentiment_async(self, coin_symbol, max_results=100, days_back=7):
+        """
+        Async method to get sentiment for a cryptocurrency from Twitter using Twscrape.
         
         Args:
             coin_symbol (str): Cryptocurrency ticker symbol (e.g., 'BTC')
             max_results (int): Maximum number of tweets to retrieve
-            days_back (int): Number of days to look back (max 7 for free tier)
+            days_back (int): Number of days to look back
             
         Returns:
             pd.DataFrame: DataFrame with tweets and sentiment data
@@ -146,66 +170,44 @@ class TwitterSentimentAnalyzer:
         query = self._build_query(coin_symbol)
         print(f"Searching for: {query}")
         
-        # Respect rate limits
-        self._respect_rate_limit()
-        
         try:
-            # Set time window - Twitter only allows searching last 7 days
+            # Set time window
             end_time = datetime.datetime.utcnow()
-            start_time = end_time - datetime.timedelta(days=min(days_back, 7))
+            start_time = end_time - datetime.timedelta(days=days_back)
             
-            # Search tweets with pagination if needed
-            all_tweets = []
-            pagination_token = None
-            max_pages = max_results // 100 + (1 if max_results % 100 > 0 else 0)
+            # Format dates for Twitter search
+            since_date = start_time.strftime('%Y-%m-%d')
+            until_date = end_time.strftime('%Y-%m-%d')
             
-            for i in range(max_pages):
-                # Respect rate limits between pagination requests
-                if i > 0:
-                    self._respect_rate_limit()
-                
-                # Search tweets
-                response = self.client.search_recent_tweets(
-                    query=query,
-                    max_results=min(100, max_results - len(all_tweets)),  # Max 100 per request
-                    tweet_fields=['created_at', 'public_metrics', 'lang'],
-                    start_time=start_time,
-                    end_time=end_time,
-                    next_token=pagination_token
-                )
-                
-                if response is None or not response.data:
-                    break
-                    
-                all_tweets.extend(response.data)
-                
-                # Get next pagination token
-                if hasattr(response, 'meta') and response.meta.get('next_token') and len(all_tweets) < max_results:
-                    pagination_token = response.meta['next_token']
-                else:
-                    break
+            # Build full query with date range
+            full_query = f"{query} since:{since_date} until:{until_date}"
             
-            if not all_tweets:
+            # Search tweets
+            tweets = await gather(self.api.search(full_query, limit=max_results))
+            
+            if not tweets:
                 print("No tweets found")
                 return pd.DataFrame()
             
             # Process tweets
             results = []
-            for tweet in tqdm(all_tweets, desc=f"Analyzing {coin_symbol} tweets"):
+            for tweet in tqdm(tweets, desc=f"Analyzing {coin_symbol} tweets"):
                 # Get sentiment scores
-                sentiment = self.analyzer.polarity_scores(tweet.text)
+                sentiment = self.analyzer.polarity_scores(tweet.rawContent)
                 
                 # Add to results
                 results.append({
-                    'date': tweet.created_at,
-                    'text': tweet.text[:280],  # Limit text length for storage
+                    'date': tweet.date,
+                    'text': tweet.rawContent[:280],  # Limit text length for storage
                     'sentiment_score': sentiment['compound'],
                     'positive_ratio': sentiment['pos'],
                     'negative_ratio': sentiment['neg'],
                     'neutral_ratio': sentiment['neu'],
-                    'retweet_count': tweet.public_metrics['retweet_count'] if hasattr(tweet, 'public_metrics') else 0,
-                    'like_count': tweet.public_metrics['like_count'] if hasattr(tweet, 'public_metrics') else 0,
-                    'reply_count': tweet.public_metrics['reply_count'] if hasattr(tweet, 'public_metrics') else 0
+                    'retweet_count': tweet.retweetCount,
+                    'like_count': tweet.likeCount,
+                    'reply_count': tweet.replyCount,
+                    'user': tweet.user.username,
+                    'tweet_id': tweet.id
                 })
             
             # Create DataFrame
@@ -218,14 +220,23 @@ class TwitterSentimentAnalyzer:
             
             return df
             
-        except tweepy.errors.TooManyRequests:
-            print("Rate limit exceeded. Waiting before trying again...")
-            time.sleep(60)  # Wait 60 seconds before trying again
-            return pd.DataFrame()  # Return empty DataFrame for now
-            
         except Exception as e:
             print(f"Error fetching tweets: {e}")
             return pd.DataFrame()
+    
+    def get_crypto_sentiment(self, coin_symbol, max_results=100, days_back=7):
+        """
+        Synchronous wrapper for get_crypto_sentiment_async.
+        
+        Args:
+            coin_symbol (str): Cryptocurrency ticker symbol (e.g., 'BTC')
+            max_results (int): Maximum number of tweets to retrieve
+            days_back (int): Number of days to look back
+            
+        Returns:
+            pd.DataFrame: DataFrame with tweets and sentiment data
+        """
+        return asyncio.run(self.get_crypto_sentiment_async(coin_symbol, max_results, days_back))
     
     def _build_query(self, coin_symbol):
         """
@@ -259,17 +270,13 @@ class TwitterSentimentAnalyzer:
                     query_parts.append(keyword)
             
             # Join with OR
-            query = " OR ".join(query_parts)
+            query = " OR ".join(f"({part})" for part in query_parts)
         else:
             # Base query with hashtag and symbol mention
             query = f"#{coin_symbol} OR {coin_symbol}"
         
         # Add filters for quality
-        query += " -is:retweet lang:en"
-        
-        # Limit query length (Twitter has a maximum)
-        if len(query) > 500:
-            query = query[:500]
+        query += " -filter:retweets lang:en"
         
         return query
     
@@ -316,9 +323,9 @@ class TwitterSentimentAnalyzer:
         
         return daily_agg
     
-    def process_all_coins(self, max_results_per_coin=50, days_back=7, output_dir='data/twitter_sentiment'):
+    async def process_all_coins_async(self, max_results_per_coin=100, days_back=30, output_dir='data/twitter_sentiment'):
         """
-        Process Twitter sentiment for all coins in the raw data directory.
+        Async method to process Twitter sentiment for all coins in the raw data directory.
         
         Args:
             max_results_per_coin (int): Maximum number of tweets to retrieve per coin
@@ -336,7 +343,7 @@ class TwitterSentimentAnalyzer:
             print(f"\nProcessing Twitter sentiment for {coin_symbol}...")
             
             # Get sentiment from Twitter
-            tweets_df = self.get_crypto_sentiment(
+            tweets_df = await self.get_crypto_sentiment_async(
                 coin_symbol, 
                 max_results=max_results_per_coin,
                 days_back=days_back
@@ -361,29 +368,49 @@ class TwitterSentimentAnalyzer:
             
             print(f"Saved Twitter sentiment for {coin_symbol}")
             
-            # Respect rate limits between coins
-            time.sleep(5)
+            # Add a short delay between coins to be nice to Twitter
+            await asyncio.sleep(5)
         
         return results
+    
+    def process_all_coins(self, max_results_per_coin=100, days_back=30, output_dir='data/twitter_sentiment'):
+        """
+        Synchronous wrapper for process_all_coins_async.
+        
+        Args:
+            max_results_per_coin (int): Maximum number of tweets to retrieve per coin
+            days_back (int): Number of days to look back
+            output_dir (str): Directory to save results
+            
+        Returns:
+            dict: Dictionary of coin symbols to sentiment DataFrames
+        """
+        return asyncio.run(self.process_all_coins_async(
+            max_results_per_coin=max_results_per_coin,
+            days_back=days_back,
+            output_dir=output_dir
+        ))
+
 
 # Example usage
 if __name__ == "__main__":
-    # Replace with your actual bearer token
-    BEARER_TOKEN = "AAAAAAAAAAAAAAAAAAAAAAhH0AEAAAAAJSLfUglW3uLvPhr8LgKPhF8nyjk%3D70hLqvwhycoakcbYtsb1caseZqSm07tOjkQ11iUcOOLKcl2ZJS"
-    
-    analyzer = TwitterSentimentAnalyzer(BEARER_TOKEN)
-    
-    # Process specific coins
-    btc_sentiment = analyzer.get_crypto_sentiment('BTC', max_results=50)
-    
-    if not btc_sentiment.empty:
-        print(f"Retrieved {len(btc_sentiment)} tweets for BTC")
-        print(btc_sentiment[['sentiment_score', 'text']].head())
+    # Define async test function
+    async def test_async():
+        analyzer = TwscrapeTwitterSentimentAnalyzer()
         
-        # Aggregate by day
-        daily_sentiment = analyzer.aggregate_daily_sentiment(btc_sentiment)
-
-        print(daily_sentiment[['date', 'sentiment_score', 'tweet_volume']].head())
+        # Optional: Add a Twitter account for better rate limits
+        # await analyzer.add_twitter_account("your_username", "your_password")
+        
+        # Get Bitcoin tweets
+        btc_tweets = await analyzer.get_crypto_sentiment_async('BTC', max_results=20)
+        
+        if not btc_tweets.empty:
+            print(f"Retrieved {len(btc_tweets)} tweets for BTC")
+            print(btc_tweets[['sentiment_score', 'text']].head())
+            
+            # Aggregate by day
+            daily_sentiment = analyzer.aggregate_daily_sentiment(btc_tweets)
+            print(daily_sentiment[['date', 'sentiment_score', 'tweet_volume']].head())
     
-    # Uncomment to process all coins
-    # all_coins = analyzer.process_all_coins(max_results_per_coin=50)
+    # Run the async test
+    asyncio.run(test_async())

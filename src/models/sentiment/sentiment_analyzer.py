@@ -1,216 +1,416 @@
+import asyncio
 import pandas as pd
 import numpy as np
-import re
-from tqdm import tqdm
-import matplotlib.pyplot as plt
-import seaborn as sns
-from datetime import datetime, timedelta
-import json
+import time
 import os
+from nltk.sentiment.vader import SentimentIntensityAnalyzer
+import datetime
+from tqdm import tqdm
+from twscrape import API, gather
+from twscrape.logger import set_log_level
 
-# NLP libraries
-import nltk
-from nltk.sentiment import SentimentIntensityAnalyzer
-from transformers import AutoTokenizer, AutoModelForSequenceClassification
-import torch
-from sklearn.feature_extraction.text import CountVectorizer, TfidfVectorizer
-from sklearn.decomposition import LatentDirichletAllocation, NMF
-from collections import Counter
 
-class CryptoSentimentAnalyzer:
+class TwscrapeTwitterSentimentAnalyzer:
     """
-    Advanced sentiment analysis for cryptocurrency news.
-    Provides methods for analyzing sentiment, topics, and coin-specific mentions.
+    Class for analyzing cryptocurrency sentiment from Twitter data using Twscrape.
+    Uses VADER for sentiment analysis and Twscrape for data retrieval.
     """
     
-    def __init__(self, model_type='vader'):
+    def __init__(self, raw_data_path='data/raw'):
         """
-        Initialize the sentiment analyzer.
+        Initialize the Twitter sentiment analyzer.
         
         Args:
-            model_type (str): Type of sentiment model to use. 
-                             Options: 'vader', 'finbert', 'combined'
+            raw_data_path (str): Path to raw data directory containing coin CSV files
         """
-        self.model_type = model_type
-        self.coin_keywords = self._load_coin_keywords()
+        # Disable excessive logging from twscrape
+        set_log_level("ERROR")
         
-        # Initialize models based on type
-        if model_type in ['vader', 'combined']:
-            try:
-                nltk.download('vader_lexicon', quiet=True)
-                self.vader = SentimentIntensityAnalyzer()
-            except Exception as e:
-                print(f"Error loading VADER: {e}")
-                self.vader = None
-        
-        if model_type in ['finbert', 'combined']:
-            try:
-                # Initialize FinBERT (financial BERT model)
-                self.tokenizer = AutoTokenizer.from_pretrained("ProsusAI/finbert")
-                self.finbert = AutoModelForSequenceClassification.from_pretrained("ProsusAI/finbert")
-            except Exception as e:
-                print(f"Error loading FinBERT: {e}")
-                self.finbert = None
-                self.tokenizer = None
-        
-        # Topic modeling
-        self.topic_model = None
-        self.vectorizer = None
+        # Initialize twscrape API
+        self.api = API()
+        self.analyzer = SentimentIntensityAnalyzer()
+        self.request_count = 0
+        self.last_request_time = None
+        self.raw_data_path = raw_data_path
+        self.coin_map = self._build_coin_map()
     
-    def _load_coin_keywords(self):
+    def _build_coin_map(self):
         """
-        Load cryptocurrency keywords and their variations.
+        Build a map of coin symbols to their common names based on files in raw data directory.
         
         Returns:
-            dict: Dictionary mapping coin tickers to lists of keywords
+            dict: Mapping of coin symbols to common names and keywords
         """
-        # This would ideally load from a file, but for now we'll hardcode some examples
-        coin_keywords = {
-            "BTC": ["bitcoin", "btc", "satoshi", "nakamoto", "bitcoin core"],
-            "ETH": ["ethereum", "eth", "vitalik", "buterin", "ether", "ethers"],
-            "XRP": ["xrp", "ripple", "garlinghouse"],
-            "SOL": ["solana", "sol"],
-            "ADA": ["cardano", "ada", "hoskinson"],
-            "DOT": ["polkadot", "dot", "gavin wood"],
-            "AVAX": ["avalanche", "avax"],
-            "BNB": ["binance", "bnb", "binance coin", "binance smart chain", "bsc"],
-            "LINK": ["chainlink", "link"],
-            "ICP": ["internet computer", "icp", "dfinity"],
-            # Add more coins and their keywords as needed
-        }
-        return coin_keywords
+        coin_map = {}
+        
+        # Get all CSV files in the raw data directory
+        try:
+            files = [f for f in os.listdir(self.raw_data_path) if f.endswith('.csv') and f != 'cryptonews.csv']
+            coin_symbols = [os.path.splitext(f)[0] for f in files]
+            
+            # Build default mappings
+            for symbol in coin_symbols:
+                coin_map[symbol] = {
+                    'symbol': symbol,
+                    'name': symbol,
+                    'keywords': [symbol]
+                }
+            
+            # Add known mappings for popular coins
+            common_coins = {
+                "BTC": {
+                    'name': 'Bitcoin',
+                    'keywords': ['bitcoin', 'btc', 'crypto']
+                },
+                "ETH": {
+                    'name': 'Ethereum',
+                    'keywords': ['ethereum', 'eth', 'vitalik']
+                },
+                "XRP": {
+                    'name': 'Ripple',
+                    'keywords': ['ripple', 'xrp']
+                },
+                "SOL": {
+                    'name': 'Solana',
+                    'keywords': ['solana', 'sol']
+                },
+                "ADA": {
+                    'name': 'Cardano',
+                    'keywords': ['cardano', 'ada', 'hoskinson']
+                },
+                "DOGE": {
+                    'name': 'Dogecoin',
+                    'keywords': ['dogecoin', 'doge']
+                },
+                "DOT": {
+                    'name': 'Polkadot',
+                    'keywords': ['polkadot', 'dot']
+                },
+                "ICP": {
+                    'name': 'Internet Computer',
+                    'keywords': ['internet computer', 'icp', 'dfinity']
+                },
+                "LINK": {
+                    'name': 'Chainlink',
+                    'keywords': ['chainlink', 'link']
+                },
+                "AVAX": {
+                    'name': 'Avalanche',
+                    'keywords': ['avalanche', 'avax']
+                },
+                "MATIC": {
+                    'name': 'Polygon',
+                    'keywords': ['polygon', 'matic']
+                },
+                "UNI": {
+                    'name': 'Uniswap',
+                    'keywords': ['uniswap', 'uni']
+                },
+                "SHIB": {
+                    'name': 'Shiba Inu',
+                    'keywords': ['shiba', 'shib']
+                }
+            }
+            
+            # Update common coins found in the directory
+            for symbol, data in common_coins.items():
+                if symbol in coin_map:
+                    coin_map[symbol].update(data)
+            
+            print(f"Found {len(coin_map)} coins in raw data directory")
+            
+        except Exception as e:
+            print(f"Error building coin map: {e}")
+        
+        return coin_map
     
-    def preprocess_text(self, text):
+    async def add_twitter_account(self, username, password, email=None, email_password=None):
         """
-        Preprocess text for sentiment analysis.
+        Add a Twitter account to the API pool for better rate limits.
+        This step is optional but recommended for better performance.
         
         Args:
-            text (str): Text to preprocess
+            username (str): Twitter username
+            password (str): Twitter password
+            email (str, optional): Email associated with Twitter account
+            email_password (str, optional): Email password
             
         Returns:
-            str: Preprocessed text
+            bool: True if successful, False otherwise
         """
-        if not isinstance(text, str):
-            return ""
-        
-        # Convert to lowercase
-        text = text.lower()
-        
-        # Remove URLs
-        text = re.sub(r'https?://\S+|www\.\S+', '', text)
-        
-        # Remove email addresses
-        text = re.sub(r'\S+@\S+', '', text)
-        
-        # Remove special characters and numbers
-        text = re.sub(r'[^\w\s]', '', text)
-        text = re.sub(r'\d+', '', text)
-        
-        # Remove extra whitespace
-        text = re.sub(r'\s+', ' ', text).strip()
-        
-        return text
+        try:
+            if email and email_password:
+                # Add account with email for handling challenges
+                await self.api.pool.add_account(username, password, email, email_password)
+            else:
+                # Add basic account
+                await self.api.pool.add_account(username, password)
+            
+            # Try to login
+            await self.api.pool.login_all()
+            print(f"Successfully added Twitter account: {username}")
+            return True
+        except Exception as e:
+            print(f"Error adding Twitter account: {e}")
+            return False
     
-    def analyze_vader_sentiment(self, text):
+    async def get_crypto_sentiment_async(self, coin_symbol, max_results=100, days_back=7):
         """
-        Analyze sentiment using VADER.
+        Async method to get sentiment for a cryptocurrency from Twitter using Twscrape.
         
         Args:
-            text (str): Text to analyze
+            coin_symbol (str): Cryptocurrency ticker symbol (e.g., 'BTC')
+            max_results (int): Maximum number of tweets to retrieve
+            days_back (int): Number of days to look back
             
         Returns:
-            dict: Sentiment scores
+            pd.DataFrame: DataFrame with tweets and sentiment data
         """
-        if not self.vader:
-            return {'compound': 0, 'pos': 0, 'neu': 0, 'neg': 0}
-        
-        if not text or not isinstance(text, str):
-            return {'compound': 0, 'pos': 0, 'neu': 0, 'neg': 0}
-        
-        return self.vader.polarity_scores(text)
-    
-    def analyze_finbert_sentiment(self, text):
-        """
-        Analyze sentiment using FinBERT.
-        
-        Args:
-            text (str): Text to analyze
-            
-        Returns:
-            dict: Sentiment scores and label
-        """
-        if not self.finbert or not self.tokenizer:
-            return {'positive': 0, 'negative': 0, 'neutral': 0, 'label': 'neutral'}
-        
-        if not text or not isinstance(text, str):
-            return {'positive': 0, 'negative': 0, 'neutral': 0, 'label': 'neutral'}
-        
-        # Truncate long texts to fit BERT's maximum sequence length
-        max_length = 512
-        if len(text.split()) > max_length:
-            text = ' '.join(text.split()[:max_length])
+        # Create search query with coin-specific terms
+        query = self._build_query(coin_symbol)
+        print(f"Searching for: {query}")
         
         try:
-            inputs = self.tokenizer(text, return_tensors="pt", truncation=True, padding=True, max_length=512)
-            with torch.no_grad():
-                outputs = self.finbert(**inputs)
-                probabilities = torch.nn.functional.softmax(outputs.logits, dim=-1)
+            # Set time window
+            end_time = datetime.datetime.utcnow()
+            start_time = end_time - datetime.timedelta(days=days_back)
             
-            # FinBERT has labels: positive (0), negative (1), neutral (2)
-            probs = probabilities[0].tolist()
-            label_map = {0: 'positive', 1: 'negative', 2: 'neutral'}
-            label_idx = probs.index(max(probs))
+            # Format dates for Twitter search
+            since_date = start_time.strftime('%Y-%m-%d')
+            until_date = end_time.strftime('%Y-%m-%d')
             
-            return {
-                'positive': probs[0],
-                'negative': probs[1],
-                'neutral': probs[2],
-                'label': label_map[label_idx]
-            }
+            # Build full query with date range
+            full_query = f"{query} since:{since_date} until:{until_date}"
+            
+            # Search tweets
+            tweets = await gather(self.api.search(full_query, limit=max_results))
+            
+            if not tweets:
+                print("No tweets found")
+                return pd.DataFrame()
+            
+            # Process tweets
+            results = []
+            for tweet in tqdm(tweets, desc=f"Analyzing {coin_symbol} tweets"):
+                # Get sentiment scores
+                sentiment = self.analyzer.polarity_scores(tweet.rawContent)
+                
+                # Add to results
+                results.append({
+                    'date': tweet.date,
+                    'text': tweet.rawContent[:280],  # Limit text length for storage
+                    'sentiment_score': sentiment['compound'],
+                    'positive_ratio': sentiment['pos'],
+                    'negative_ratio': sentiment['neg'],
+                    'neutral_ratio': sentiment['neu'],
+                    'retweet_count': tweet.retweetCount,
+                    'like_count': tweet.likeCount,
+                    'reply_count': tweet.replyCount,
+                    'user': tweet.user.username,
+                    'tweet_id': tweet.id
+                })
+            
+            # Create DataFrame
+            df = pd.DataFrame(results)
+            
+            # Add engagement-weighted sentiment
+            if not df.empty:
+                df['engagement'] = df['retweet_count'] + df['like_count'] + df['reply_count'] + 1
+                df['weighted_sentiment'] = df['sentiment_score'] * np.log1p(df['engagement'])  # Log-scale engagement for more balanced weighting
+            
+            return df
+            
         except Exception as e:
-            print(f"Error in FinBERT analysis: {e}")
-            return {'positive': 0, 'negative': 0, 'neutral': 0, 'label': 'neutral'}
+            print(f"Error fetching tweets: {e}")
+            return pd.DataFrame()
     
-    def analyze_sentiment(self, text):
+    def get_crypto_sentiment(self, coin_symbol, max_results=100, days_back=7):
         """
-        Analyze sentiment using the selected model(s).
+        Synchronous wrapper for get_crypto_sentiment_async.
         
         Args:
-            text (str): Text to analyze
+            coin_symbol (str): Cryptocurrency ticker symbol (e.g., 'BTC')
+            max_results (int): Maximum number of tweets to retrieve
+            days_back (int): Number of days to look back
             
         Returns:
-            dict: Combined sentiment analysis results
+            pd.DataFrame: DataFrame with tweets and sentiment data
         """
-        preprocessed_text = self.preprocess_text(text)
+        return asyncio.run(self.get_crypto_sentiment_async(coin_symbol, max_results, days_back))
+    
+    def _build_query(self, coin_symbol):
+        """
+        Build a query string for searching tweets based on coin symbol.
         
-        if self.model_type == 'vader':
-            vader_scores = self.analyze_vader_sentiment(preprocessed_text)
+        Args:
+            coin_symbol (str): Cryptocurrency ticker symbol
             
-            # Map VADER compound score to sentiment class
-            if vader_scores['compound'] >= 0.05:
-                sentiment_class = 'positive'
-            elif vader_scores['compound'] <= -0.05:
-                sentiment_class = 'negative'
-            else:
-                sentiment_class = 'neutral'
-            
-            return {
-                'compound': vader_scores['compound'],
-                'positive': vader_scores['pos'],
-                'negative': vader_scores['neg'],
-                'neutral': vader_scores['neu'],
-                'class': sentiment_class
-            }
+        Returns:
+            str: Search query string
+        """
+        coin_symbol = coin_symbol.upper()
         
-        elif self.model_type == 'finbert':
-            finbert_scores = self.analyze_finbert_sentiment(preprocessed_text)
+        # Use coin map if available
+        if coin_symbol in self.coin_map:
+            coin_data = self.coin_map[coin_symbol]
+            query_parts = []
             
-            return {
-                'positive': finbert_scores['positive'],
-                'negative': finbert_scores['negative'],
-                'neutral': finbert_scores['neutral'],
-                'class': finbert_scores['label']
-            }
+            # Add hashtag and symbol
+            query_parts.append(f"#{coin_symbol}")
+            query_parts.append(coin_symbol)
+            
+            # Add coin name if different from symbol
+            if coin_data['name'].lower() != coin_symbol.lower():
+                query_parts.append(coin_data['name'])
+                query_parts.append(f"#{coin_data['name'].replace(' ', '')}")
+            
+            # Add additional keywords
+            for keyword in coin_data['keywords']:
+                if keyword.lower() != coin_symbol.lower() and keyword.lower() != coin_data['name'].lower():
+                    query_parts.append(keyword)
+            
+            # Join with OR
+            query = " OR ".join(f"({part})" for part in query_parts)
+        else:
+            # Base query with hashtag and symbol mention
+            query = f"#{coin_symbol} OR {coin_symbol}"
         
-        elif self.model_type == 'combined':
-            vader_scores = self.analyze_vader_sentiment(preprocessed_text)
+        # Add filters for quality
+        query += " -filter:retweets lang:en"
+        
+        return query
+    
+    def aggregate_daily_sentiment(self, tweet_df):
+        """
+        Aggregate tweet-level sentiment data to daily level.
+        
+        Args:
+            tweet_df (pd.DataFrame): DataFrame with tweet-level sentiment data
+            
+        Returns:
+            pd.DataFrame: Daily aggregated sentiment data
+        """
+        if tweet_df.empty:
+            return pd.DataFrame()
+        
+        # Convert date to datetime if needed
+        if not pd.api.types.is_datetime64_dtype(tweet_df['date']):
+            tweet_df['date'] = pd.to_datetime(tweet_df['date'])
+        
+        # Extract date only for grouping
+        tweet_df['date_day'] = tweet_df['date'].dt.date
+        
+        # Aggregate by day
+        daily_agg = tweet_df.groupby('date_day').agg({
+            'sentiment_score': 'mean',
+            'positive_ratio': 'mean',
+            'negative_ratio': 'mean',
+            'neutral_ratio': 'mean',
+            'text': 'count',
+            'engagement': 'sum',
+            'weighted_sentiment': 'sum'
+        }).reset_index()
+        
+        # Calculate engagement-weighted sentiment
+        daily_agg['sentiment_score_weighted'] = daily_agg['weighted_sentiment'] / daily_agg['engagement']
+        
+        # Rename count column to volume
+        daily_agg.rename(columns={'text': 'tweet_volume'}, inplace=True)
+        
+        # Convert date_day back to datetime
+        daily_agg['date'] = pd.to_datetime(daily_agg['date_day'])
+        daily_agg.drop('date_day', axis=1, inplace=True)
+        
+        return daily_agg
+    
+    async def process_all_coins_async(self, max_results_per_coin=100, days_back=30, output_dir='data/twitter_sentiment'):
+        """
+        Async method to process Twitter sentiment for all coins in the raw data directory.
+        
+        Args:
+            max_results_per_coin (int): Maximum number of tweets to retrieve per coin
+            days_back (int): Number of days to look back
+            output_dir (str): Directory to save results
+            
+        Returns:
+            dict: Dictionary of coin symbols to sentiment DataFrames
+        """
+        os.makedirs(output_dir, exist_ok=True)
+        
+        results = {}
+        
+        for coin_symbol in self.coin_map.keys():
+            print(f"\nProcessing Twitter sentiment for {coin_symbol}...")
+            
+            # Get sentiment from Twitter
+            tweets_df = await self.get_crypto_sentiment_async(
+                coin_symbol, 
+                max_results=max_results_per_coin,
+                days_back=days_back
+            )
+            
+            if tweets_df.empty:
+                print(f"No tweets found for {coin_symbol}")
+                continue
+            
+            # Aggregate by day
+            daily_sentiment = self.aggregate_daily_sentiment(tweets_df)
+            
+            # Store results
+            results[coin_symbol] = daily_sentiment
+            
+            # Save to CSV
+            tweets_output_path = os.path.join(output_dir, f"{coin_symbol}_tweets.csv")
+            daily_output_path = os.path.join(output_dir, f"{coin_symbol}_daily.csv")
+            
+            tweets_df.to_csv(tweets_output_path, index=False)
+            daily_sentiment.to_csv(daily_output_path, index=False)
+            
+            print(f"Saved Twitter sentiment for {coin_symbol}")
+            
+            # Add a short delay between coins to be nice to Twitter
+            await asyncio.sleep(5)
+        
+        return results
+    
+    def process_all_coins(self, max_results_per_coin=100, days_back=30, output_dir='data/twitter_sentiment'):
+        """
+        Synchronous wrapper for process_all_coins_async.
+        
+        Args:
+            max_results_per_coin (int): Maximum number of tweets to retrieve per coin
+            days_back (int): Number of days to look back
+            output_dir (str): Directory to save results
+            
+        Returns:
+            dict: Dictionary of coin symbols to sentiment DataFrames
+        """
+        return asyncio.run(self.process_all_coins_async(
+            max_results_per_coin=max_results_per_coin,
+            days_back=days_back,
+            output_dir=output_dir
+        ))
+
+
+# Example usage
+if __name__ == "__main__":
+    # Define async test function
+    async def test_async():
+        analyzer = TwscrapeTwitterSentimentAnalyzer()
+        
+        # Optional: Add a Twitter account for better rate limits
+        # await analyzer.add_twitter_account("your_username", "your_password")
+        
+        # Get Bitcoin tweets
+        btc_tweets = await analyzer.get_crypto_sentiment_async('BTC', max_results=20)
+        
+        if not btc_tweets.empty:
+            print(f"Retrieved {len(btc_tweets)} tweets for BTC")
+            print(btc_tweets[['sentiment_score', 'text']].head())
+            
+            # Aggregate by day
+            daily_sentiment = analyzer.aggregate_daily_sentiment(btc_tweets)
+            print(daily_sentiment[['date', 'sentiment_score', 'tweet_volume']].head())
+    
+    # Run the async test
+    asyncio.run(test_async())
