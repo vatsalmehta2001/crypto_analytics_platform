@@ -1,18 +1,28 @@
 ./
+    btc.py
+    twscrape_compatibility.py
+    update_sentiment.py
+    .DS_Store
     dir.py
     LICENSE
     requirements.txt
-    VADER_lexicon.py
+    collect_reddit_data.py
     README.md
     directory_structure.txt
-    twitter.py
+    accounts.db
+    train_sentiment_model.py
+    brightdata_config.py
+    advanced_twitter_search.py
     models/
         saved/
+    __pycache__/
+        twscrape_compatibility.cpython-311.pyc
     dashboard/
         .DS_Store
         app.py
         assets/
             .DS_Store
+            custom.css
     .git/
         config
         HEAD
@@ -21,9 +31,6 @@
         packed-refs
         COMMIT_EDITMSG
         FETCH_HEAD
-        .gitstatus.EZnMFR/
-            a/
-            b/
         objects/
             61/
                 85b2bbfee1c13235faddafc20602a05f902a85
@@ -97,6 +104,8 @@
                 800fa8fbc0dd63ff01be3330fbc98d82054e8b
             34/
                 a6bb1f3aad629fafb5703387155c0c2340af86
+            33/
+                ba3a4496c7caaf64c589435bb5f5bf03b9f726
             05/
                 3e83b016cf4a9d10130e010b7dde8c518b04a3
                 b365eabfe6c82f51766df18520d051430e5a24
@@ -106,6 +115,7 @@
             9c/
                 8c4e57ad7c9919697d5bcd24211343b8405052
                 91d0f3fe51fb6718939fba0ee4e7cd9998d134
+                a68db46f54509c6c4ee2789f93189de1b49262
             02/
                 6cd63dce4fff0f0200f30e407664f5090c077f
                 87da3a70ee3cc8c16391c59b2827022b074652
@@ -134,6 +144,7 @@
                 471ba953cccf3bf207bf0f01be208b30bf306a
                 113a005a24f97dfeeaa43a0a5536792458367d
             d0/
+                771dee0d20148fbff922794ca31db25228d0d5
                 e8bf8e392ea65ff177077d97415704b29b88e0
             be/
                 4732f1c25559a7ee560893e3e554f3f9c1a288
@@ -148,6 +159,7 @@
             da/
                 2701f1ad01e05cf4903ac7afe0d22530a3c93a
             a2/
+                a1349b275caa68302280542f7e93b79a857573
                 fbec25cc66b45197af0b24319918dc129e7e6f
             a5/
                 26eb3f64face15d82951a626be1a8fd69c144f
@@ -175,6 +187,7 @@
                 605691d9491af6ff3472a8fb706b35e32723bc
                 d05d1a960b3a0e8b42cc55ec3724420fedc3aa
             f2/
+                46920c96e239e1a49d54979cd24ea1a4e6ebd0
                 ff1436d745eb2320c1f87a9d82cdf236a66499
                 7b5e82e019ff72747ad9b3fc22f09d15900091
             f5/
@@ -222,18 +235,23 @@
                 76a11e56e4c7f6a2cbf4d5e2196238312c61df
             1f/
                 a3985b6d77e34ff4fb805eefd671ef7af36f42
+            73/
+                fb5e48c37777697c00dea0a58144c7b95ee26f
             80/
                 4a3b67f7121e5a5109ae6f41a114c61efca2c1
             74/
                 feea0287d75c4f53d33c0be9f84646fdb82513
                 b360af3ad222a6caf1d3dd12d489f30e539c25
             1a/
+                ca24629abee2232a0a903f27f62b308502f4a4
                 613ca4c032adda44cd12fc2932cdd0baf300e9
             28/
                 b61d28eb153911aca2c501d482adbf8a344f12
                 bd186b0bad8db47cdffd50059d73684cc55f17
+                3edfeffbf19751038d4be5b49b1d4371ac2443
             17/
                 80acc436c10e3d6e82990e0853489950a4fe1c
+                491fe9b328427ca4eb16ca43a13f29107f42f1
             7b/
                 637895c85414ca880a49617207b1c1a04a3734
             8f/
@@ -295,8 +313,11 @@
                 0c4c0ee704c5fb081cce30dee8b15e5288fc96
             5c/
                 f3e2790318190b661d8a4575953668721d7456
+                04db426588d096921d744cf236db4e1da441d3
             31/
                 12219bf729191ce391ea6add4c4a903f63463d
+                9fdcd110048d916da3fec70bc5d2d8d82ad6e1
+                ec30e4fd515473428dac657e6ce1cac14295af
             info/
             65/
                 81117bd8cb20da22359a5cafdee2772fdea0e6
@@ -317,6 +338,7 @@
                 d432cdb5f51e63463570d6eee1fe40ec98e85a
             3f/
                 86c1bfe9081942277cceca2585464fa460eeec
+                6efa23a13df8aceb73da76a1b87a2eb98868ae
                 b5abf4df3be5a73c2c197ff94a3fb4e1ac8184
                 fd7b92e84245a115934ce629fe793e2fcc7b7b
             5e/
@@ -354,6 +376,8 @@
                 1d291bdfd2f67d3d60a4bf0b61e8505613eb23
             64/
                 a45ce356a204e6ffc9434807f9c919a1dd387e
+            d3/
+                1e431534fc1928d9817335995364d3e8196f7b
             d4/
                 43b8711b61c7217ad327179b40862a16003659
                 03d1ce045d522d4ede3fa3e6299f62dba0f04f
@@ -375,6 +399,8 @@
                 4a51467bff8d6bef187deb4edeed0d20d043f6
                 2d980109f6c0b90e3634af15931605b0ccbcd7
                 b813eee19b373c3d5904d0901301381c064691
+            aa/
+                325a84023d58847d9831a3c85a01d8631784b2
             af/
                 9aee40df1945b7435590cab1f4f9a0746ad57e
                 8aed5823c970dabc4f4d996d58ffd4746672a6
@@ -385,6 +411,8 @@
             ef/
                 75881b3196a39acab11c22ccd62ad722680c5d
                 7d5b02010875298000317a78f5a8109a5528a3
+            c3/
+                b5cb75e0245d3f9022bf361ccc43bf1be2db8e
             c4/
                 e19c753f53bf4ee85e60166a1d0e95938c01a7
                 687921ad5d7eb0b6bb500dd41627bedf2992f1
@@ -392,6 +420,7 @@
                 0aa808932f937f4c0e9825703a2ec8fed756b4
             cc/
                 4b575e702e45f4839b98e3ffbb315798f7d7d1
+                161e724c02d38304f24190ec7792e96808e4c5
             f9/
                 2be58c7750e41a7ee281dd93a551bb5b78b526
                 949eadc9892b92519e05a62dbc3fb2f7ac75b8
@@ -446,6 +475,7 @@
                 2494e27dbd1c83430cde89ecaf9318b36f2b0f
                 6baf5abfedfc1c3999cadb5f7750aca553f933
             84/
+                dfc4801a423daba6b30bb58db703340dfbb22a
                 ba6110df9b9f72d42c64dc75e8185b6bd010ec
             4a/
                 41b64162e251fea1ba89f6105e3c8deec54d0e
@@ -472,12 +502,17 @@
                 e4ba0a810f05dbe3b3e4d559926233a9e4d4b2
             49/
                 40ebad9badd853cc2de9152e4916d29c41017f
+            40/
+                7f2295eefb135ccbdbdfd3b458cb7bbba12046
             2e/
                 dbdc0ac88269459367197ff48e3511d99f8301
                 ea87b4b44e4f9c5988783914a6a54a105d50b0
                 d862d1366b987cc6e31161caf2ce3926757aa6
             2b/
                 45587c0258af8a1d440e257130cf1f29925e9f
+            47/
+                4687365e7d8b0d9e5d3bf13fa409b7aff086c5
+                b07a907135aba442d00e427ebc4b4c95d91065
             78/
                 f9ccb9c8c9451ccf7446836d802850434df3c1
                 8fa13f1e60d4aef542b4eea8ef2f469763cbb8
@@ -533,6 +568,7 @@
         branches/
     data/
         .DS_Store
+        twitter_sentiment/
         market/
         processed/
             MINA_processed.csv
@@ -804,11 +840,15 @@
                     price_predictor.cpython-311.pyc
             api/
             sentiment/
-                twitter_sentiment.py
+                VADER_lexicon.py
+                twscrape_twitter.py
                 sentiment_analyzer.py
                 __pycache__/
+                    twscrape_twitter.cpython-311.pyc
+                    twitter_snscrape.cpython-311.pyc
                     twitter_sentiment.cpython-311.pyc
                     sentiment_analyzer.cpython-311.pyc
+                    VADER_lexicon.cpython-311.pyc
         __pycache__/
             main.cpython-311.pyc
         data/

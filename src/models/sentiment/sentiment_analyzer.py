@@ -1,416 +1,553 @@
-import asyncio
 import pandas as pd
 import numpy as np
-import time
+import asyncio
+import pickle
 import os
+from datetime import datetime, timedelta
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import classification_report, accuracy_score
 from nltk.sentiment.vader import SentimentIntensityAnalyzer
-import datetime
+from nltk.tokenize import word_tokenize
+from nltk.corpus import stopwords
+import nltk
+import re
 from tqdm import tqdm
-from twscrape import API, gather
-from twscrape.logger import set_log_level
+import joblib
 
+# Ensure NLTK resources are downloaded
+try:
+    nltk.data.find('tokenizers/punkt')
+    nltk.data.find('corpora/stopwords')
+    nltk.data.find('sentiment/vader_lexicon.zip')
+except LookupError:
+    nltk.download('punkt')
+    nltk.download('stopwords')
+    nltk.download('vader_lexicon')
 
-class TwscrapeTwitterSentimentAnalyzer:
+# Add crypto-specific terms to VADER lexicon
+try:
+    from VADER_lexicon import crypto_lexicon, emoji_lexicon
+except ImportError:
+    print("Warning: VADER_lexicon not found or error importing. Using default lexicon.")
+    crypto_lexicon = {}
+    emoji_lexicon = {}
+
+class EnhancedSentimentAnalyzer:
     """
-    Class for analyzing cryptocurrency sentiment from Twitter data using Twscrape.
-    Uses VADER for sentiment analysis and Twscrape for data retrieval.
+    Enhanced sentiment analyzer that combines VADER with a trained classifier model
+    for better accuracy on cryptocurrency text data.
     """
     
-    def __init__(self, raw_data_path='data/raw'):
+    def __init__(self, model_dir='models/saved'):
         """
-        Initialize the Twitter sentiment analyzer.
+        Initialize the enhanced sentiment analyzer with VADER and ML models.
         
         Args:
-            raw_data_path (str): Path to raw data directory containing coin CSV files
+            model_dir (str): Directory to save/load trained models
         """
-        # Disable excessive logging from twscrape
-        set_log_level("ERROR")
+        self.model_dir = model_dir
+        os.makedirs(model_dir, exist_ok=True)
         
-        # Initialize twscrape API
-        self.api = API()
-        self.analyzer = SentimentIntensityAnalyzer()
-        self.request_count = 0
-        self.last_request_time = None
-        self.raw_data_path = raw_data_path
-        self.coin_map = self._build_coin_map()
-    
-    def _build_coin_map(self):
-        """
-        Build a map of coin symbols to their common names based on files in raw data directory.
+        # Initialize VADER with crypto lexicon
+        self.vader = SentimentIntensityAnalyzer()
+        # Add crypto-specific terms to lexicon
+        for word, score in crypto_lexicon.items():
+            self.vader.lexicon[word] = score
         
-        Returns:
-            dict: Mapping of coin symbols to common names and keywords
-        """
-        coin_map = {}
+        # ML model components
+        self.vectorizer = None
+        self.classifier = None
+        self.is_trained = False
         
-        # Get all CSV files in the raw data directory
+        # Try to load pre-trained models
+        self._load_models()
+        
+        # Text preprocessing
+        self.stop_words = set(stopwords.words('english'))
+        
+    def _load_models(self):
+        """Load pre-trained vectorizer and classifier models if they exist."""
         try:
-            files = [f for f in os.listdir(self.raw_data_path) if f.endswith('.csv') and f != 'cryptonews.csv']
-            coin_symbols = [os.path.splitext(f)[0] for f in files]
+            vectorizer_path = os.path.join(self.model_dir, 'tfidf_vectorizer.pkl')
+            classifier_path = os.path.join(self.model_dir, 'sentiment_classifier.pkl')
             
-            # Build default mappings
-            for symbol in coin_symbols:
-                coin_map[symbol] = {
-                    'symbol': symbol,
-                    'name': symbol,
-                    'keywords': [symbol]
-                }
+            if os.path.exists(vectorizer_path) and os.path.exists(classifier_path):
+                self.vectorizer = joblib.load(vectorizer_path)
+                self.classifier = joblib.load(classifier_path)
+                self.is_trained = True
+                print("Loaded pre-trained sentiment models")
+                return True
             
-            # Add known mappings for popular coins
-            common_coins = {
-                "BTC": {
-                    'name': 'Bitcoin',
-                    'keywords': ['bitcoin', 'btc', 'crypto']
-                },
-                "ETH": {
-                    'name': 'Ethereum',
-                    'keywords': ['ethereum', 'eth', 'vitalik']
-                },
-                "XRP": {
-                    'name': 'Ripple',
-                    'keywords': ['ripple', 'xrp']
-                },
-                "SOL": {
-                    'name': 'Solana',
-                    'keywords': ['solana', 'sol']
-                },
-                "ADA": {
-                    'name': 'Cardano',
-                    'keywords': ['cardano', 'ada', 'hoskinson']
-                },
-                "DOGE": {
-                    'name': 'Dogecoin',
-                    'keywords': ['dogecoin', 'doge']
-                },
-                "DOT": {
-                    'name': 'Polkadot',
-                    'keywords': ['polkadot', 'dot']
-                },
-                "ICP": {
-                    'name': 'Internet Computer',
-                    'keywords': ['internet computer', 'icp', 'dfinity']
-                },
-                "LINK": {
-                    'name': 'Chainlink',
-                    'keywords': ['chainlink', 'link']
-                },
-                "AVAX": {
-                    'name': 'Avalanche',
-                    'keywords': ['avalanche', 'avax']
-                },
-                "MATIC": {
-                    'name': 'Polygon',
-                    'keywords': ['polygon', 'matic']
-                },
-                "UNI": {
-                    'name': 'Uniswap',
-                    'keywords': ['uniswap', 'uni']
-                },
-                "SHIB": {
-                    'name': 'Shiba Inu',
-                    'keywords': ['shiba', 'shib']
-                }
-            }
-            
-            # Update common coins found in the directory
-            for symbol, data in common_coins.items():
-                if symbol in coin_map:
-                    coin_map[symbol].update(data)
-            
-            print(f"Found {len(coin_map)} coins in raw data directory")
-            
-        except Exception as e:
-            print(f"Error building coin map: {e}")
+            print("No pre-trained models found. Models need to be trained.")
+            return False
         
-        return coin_map
-    
-    async def add_twitter_account(self, username, password, email=None, email_password=None):
-        """
-        Add a Twitter account to the API pool for better rate limits.
-        This step is optional but recommended for better performance.
-        
-        Args:
-            username (str): Twitter username
-            password (str): Twitter password
-            email (str, optional): Email associated with Twitter account
-            email_password (str, optional): Email password
-            
-        Returns:
-            bool: True if successful, False otherwise
-        """
-        try:
-            if email and email_password:
-                # Add account with email for handling challenges
-                await self.api.pool.add_account(username, password, email, email_password)
-            else:
-                # Add basic account
-                await self.api.pool.add_account(username, password)
-            
-            # Try to login
-            await self.api.pool.login_all()
-            print(f"Successfully added Twitter account: {username}")
-            return True
         except Exception as e:
-            print(f"Error adding Twitter account: {e}")
+            print(f"Error loading models: {e}")
             return False
     
-    async def get_crypto_sentiment_async(self, coin_symbol, max_results=100, days_back=7):
+    def _save_models(self):
+        """Save the trained vectorizer and classifier models."""
+        try:
+            if self.vectorizer is not None and self.classifier is not None:
+                joblib.dump(self.vectorizer, os.path.join(self.model_dir, 'tfidf_vectorizer.pkl'))
+                joblib.dump(self.classifier, os.path.join(self.model_dir, 'sentiment_classifier.pkl'))
+                print("Saved sentiment models to disk")
+                return True
+            
+            print("Models not initialized, cannot save")
+            return False
+        
+        except Exception as e:
+            print(f"Error saving models: {e}")
+            return False
+    
+    def preprocess_text(self, text):
         """
-        Async method to get sentiment for a cryptocurrency from Twitter using Twscrape.
+        Preprocess text for sentiment analysis.
         
         Args:
-            coin_symbol (str): Cryptocurrency ticker symbol (e.g., 'BTC')
-            max_results (int): Maximum number of tweets to retrieve
-            days_back (int): Number of days to look back
+            text (str): Raw text to preprocess
             
         Returns:
-            pd.DataFrame: DataFrame with tweets and sentiment data
+            str: Preprocessed text
         """
-        # Create search query with coin-specific terms
-        query = self._build_query(coin_symbol)
-        print(f"Searching for: {query}")
+        if not isinstance(text, str):
+            return ""
+            
+        # Convert to lowercase
+        text = text.lower()
+        
+        # Remove URLs
+        text = re.sub(r'https?://\S+|www\.\S+', '', text)
+        
+        # Remove mentions and hashtags while keeping hashtag content
+        text = re.sub(r'@\w+', '', text)
+        text = re.sub(r'#(\w+)', r'\1', text)
+        
+        # Remove special characters and numbers
+        text = re.sub(r'[^\w\s]', '', text)
+        text = re.sub(r'\d+', '', text)
+        
+        # Tokenize
+        tokens = word_tokenize(text)
+        
+        # Remove stop words
+        tokens = [word for word in tokens if word not in self.stop_words]
+        
+        # Join tokens back to string
+        return ' '.join(tokens)
+    
+    def train_model(self, tweets_df, manual_labels=None, test_size=0.2):
+        """
+        Train the ML classifier for sentiment analysis.
+        
+        Args:
+            tweets_df (pd.DataFrame): DataFrame with tweet data including text
+            manual_labels (pd.DataFrame, optional): DataFrame with manual sentiment labels
+            test_size (float): Proportion of data to use for testing
+            
+        Returns:
+            dict: Training metrics
+        """
+        # Check if we have enough data
+        if tweets_df is None or len(tweets_df) < 100:
+            print("Not enough data to train model (need at least 100 examples)")
+            return {"error": "Insufficient data"}
         
         try:
-            # Set time window
-            end_time = datetime.datetime.utcnow()
-            start_time = end_time - datetime.timedelta(days=days_back)
+            # Prepare the data
+            texts = tweets_df['text'].astype(str).values
             
-            # Format dates for Twitter search
-            since_date = start_time.strftime('%Y-%m-%d')
-            until_date = end_time.strftime('%Y-%m-%d')
+            # Preprocess texts
+            processed_texts = [self.preprocess_text(text) for text in tqdm(texts, desc="Preprocessing texts")]
             
-            # Build full query with date range
-            full_query = f"{query} since:{since_date} until:{until_date}"
-            
-            # Search tweets
-            tweets = await gather(self.api.search(full_query, limit=max_results))
-            
-            if not tweets:
-                print("No tweets found")
-                return pd.DataFrame()
-            
-            # Process tweets
-            results = []
-            for tweet in tqdm(tweets, desc=f"Analyzing {coin_symbol} tweets"):
-                # Get sentiment scores
-                sentiment = self.analyzer.polarity_scores(tweet.rawContent)
+            # Use VADER to create training labels if no manual labels provided
+            if manual_labels is None:
+                print("Using VADER to create training labels")
+                labels = []
                 
-                # Add to results
-                results.append({
-                    'date': tweet.date,
-                    'text': tweet.rawContent[:280],  # Limit text length for storage
-                    'sentiment_score': sentiment['compound'],
-                    'positive_ratio': sentiment['pos'],
-                    'negative_ratio': sentiment['neg'],
-                    'neutral_ratio': sentiment['neu'],
-                    'retweet_count': tweet.retweetCount,
-                    'like_count': tweet.likeCount,
-                    'reply_count': tweet.replyCount,
-                    'user': tweet.user.username,
-                    'tweet_id': tweet.id
-                })
+                for text in tqdm(texts, desc="Generating VADER labels"):
+                    score = self.vader.polarity_scores(text)
+                    # Convert to classification: -1 (negative), 0 (neutral), 1 (positive)
+                    if score['compound'] >= 0.05:
+                        labels.append(1)  # Positive
+                    elif score['compound'] <= -0.05:
+                        labels.append(-1)  # Negative
+                    else:
+                        labels.append(0)  # Neutral
+            else:
+                print("Using provided manual labels")
+                if len(manual_labels) != len(tweets_df):
+                    print("Warning: Number of labels doesn't match number of tweets")
+                    return {"error": "Label count mismatch"}
+                labels = manual_labels
             
-            # Create DataFrame
-            df = pd.DataFrame(results)
+            # Create TF-IDF features
+            self.vectorizer = TfidfVectorizer(
+                max_features=5000,
+                min_df=5,
+                max_df=0.8,
+                ngram_range=(1, 2)
+            )
+            X = self.vectorizer.fit_transform(processed_texts)
             
-            # Add engagement-weighted sentiment
-            if not df.empty:
-                df['engagement'] = df['retweet_count'] + df['like_count'] + df['reply_count'] + 1
-                df['weighted_sentiment'] = df['sentiment_score'] * np.log1p(df['engagement'])  # Log-scale engagement for more balanced weighting
-            
-            return df
-            
-        except Exception as e:
-            print(f"Error fetching tweets: {e}")
-            return pd.DataFrame()
-    
-    def get_crypto_sentiment(self, coin_symbol, max_results=100, days_back=7):
-        """
-        Synchronous wrapper for get_crypto_sentiment_async.
-        
-        Args:
-            coin_symbol (str): Cryptocurrency ticker symbol (e.g., 'BTC')
-            max_results (int): Maximum number of tweets to retrieve
-            days_back (int): Number of days to look back
-            
-        Returns:
-            pd.DataFrame: DataFrame with tweets and sentiment data
-        """
-        return asyncio.run(self.get_crypto_sentiment_async(coin_symbol, max_results, days_back))
-    
-    def _build_query(self, coin_symbol):
-        """
-        Build a query string for searching tweets based on coin symbol.
-        
-        Args:
-            coin_symbol (str): Cryptocurrency ticker symbol
-            
-        Returns:
-            str: Search query string
-        """
-        coin_symbol = coin_symbol.upper()
-        
-        # Use coin map if available
-        if coin_symbol in self.coin_map:
-            coin_data = self.coin_map[coin_symbol]
-            query_parts = []
-            
-            # Add hashtag and symbol
-            query_parts.append(f"#{coin_symbol}")
-            query_parts.append(coin_symbol)
-            
-            # Add coin name if different from symbol
-            if coin_data['name'].lower() != coin_symbol.lower():
-                query_parts.append(coin_data['name'])
-                query_parts.append(f"#{coin_data['name'].replace(' ', '')}")
-            
-            # Add additional keywords
-            for keyword in coin_data['keywords']:
-                if keyword.lower() != coin_symbol.lower() and keyword.lower() != coin_data['name'].lower():
-                    query_parts.append(keyword)
-            
-            # Join with OR
-            query = " OR ".join(f"({part})" for part in query_parts)
-        else:
-            # Base query with hashtag and symbol mention
-            query = f"#{coin_symbol} OR {coin_symbol}"
-        
-        # Add filters for quality
-        query += " -filter:retweets lang:en"
-        
-        return query
-    
-    def aggregate_daily_sentiment(self, tweet_df):
-        """
-        Aggregate tweet-level sentiment data to daily level.
-        
-        Args:
-            tweet_df (pd.DataFrame): DataFrame with tweet-level sentiment data
-            
-        Returns:
-            pd.DataFrame: Daily aggregated sentiment data
-        """
-        if tweet_df.empty:
-            return pd.DataFrame()
-        
-        # Convert date to datetime if needed
-        if not pd.api.types.is_datetime64_dtype(tweet_df['date']):
-            tweet_df['date'] = pd.to_datetime(tweet_df['date'])
-        
-        # Extract date only for grouping
-        tweet_df['date_day'] = tweet_df['date'].dt.date
-        
-        # Aggregate by day
-        daily_agg = tweet_df.groupby('date_day').agg({
-            'sentiment_score': 'mean',
-            'positive_ratio': 'mean',
-            'negative_ratio': 'mean',
-            'neutral_ratio': 'mean',
-            'text': 'count',
-            'engagement': 'sum',
-            'weighted_sentiment': 'sum'
-        }).reset_index()
-        
-        # Calculate engagement-weighted sentiment
-        daily_agg['sentiment_score_weighted'] = daily_agg['weighted_sentiment'] / daily_agg['engagement']
-        
-        # Rename count column to volume
-        daily_agg.rename(columns={'text': 'tweet_volume'}, inplace=True)
-        
-        # Convert date_day back to datetime
-        daily_agg['date'] = pd.to_datetime(daily_agg['date_day'])
-        daily_agg.drop('date_day', axis=1, inplace=True)
-        
-        return daily_agg
-    
-    async def process_all_coins_async(self, max_results_per_coin=100, days_back=30, output_dir='data/twitter_sentiment'):
-        """
-        Async method to process Twitter sentiment for all coins in the raw data directory.
-        
-        Args:
-            max_results_per_coin (int): Maximum number of tweets to retrieve per coin
-            days_back (int): Number of days to look back
-            output_dir (str): Directory to save results
-            
-        Returns:
-            dict: Dictionary of coin symbols to sentiment DataFrames
-        """
-        os.makedirs(output_dir, exist_ok=True)
-        
-        results = {}
-        
-        for coin_symbol in self.coin_map.keys():
-            print(f"\nProcessing Twitter sentiment for {coin_symbol}...")
-            
-            # Get sentiment from Twitter
-            tweets_df = await self.get_crypto_sentiment_async(
-                coin_symbol, 
-                max_results=max_results_per_coin,
-                days_back=days_back
+            # Split data
+            X_train, X_test, y_train, y_test = train_test_split(
+                X, labels, test_size=test_size, random_state=42, stratify=labels
             )
             
-            if tweets_df.empty:
-                print(f"No tweets found for {coin_symbol}")
-                continue
+            # Train model
+            print("Training sentiment classifier...")
+            self.classifier = RandomForestClassifier(
+                n_estimators=100,
+                random_state=42,
+                n_jobs=-1,
+                class_weight='balanced'
+            )
+            self.classifier.fit(X_train, y_train)
             
-            # Aggregate by day
-            daily_sentiment = self.aggregate_daily_sentiment(tweets_df)
+            # Evaluate
+            y_pred = self.classifier.predict(X_test)
+            accuracy = accuracy_score(y_test, y_pred)
+            report = classification_report(y_test, y_pred, output_dict=True)
             
-            # Store results
-            results[coin_symbol] = daily_sentiment
+            print(f"Model accuracy: {accuracy:.4f}")
+            print(classification_report(y_test, y_pred))
             
-            # Save to CSV
-            tweets_output_path = os.path.join(output_dir, f"{coin_symbol}_tweets.csv")
-            daily_output_path = os.path.join(output_dir, f"{coin_symbol}_daily.csv")
+            # Save models
+            self.is_trained = True
+            self._save_models()
             
-            tweets_df.to_csv(tweets_output_path, index=False)
-            daily_sentiment.to_csv(daily_output_path, index=False)
+            return {
+                "accuracy": accuracy,
+                "report": report,
+                "n_samples": len(labels),
+                "feature_count": X.shape[1]
+            }
             
-            print(f"Saved Twitter sentiment for {coin_symbol}")
-            
-            # Add a short delay between coins to be nice to Twitter
-            await asyncio.sleep(5)
-        
-        return results
+        except Exception as e:
+            print(f"Error training model: {e}")
+            import traceback
+            traceback.print_exc()
+            return {"error": str(e)}
     
-    def process_all_coins(self, max_results_per_coin=100, days_back=30, output_dir='data/twitter_sentiment'):
+    def analyze_text(self, text):
         """
-        Synchronous wrapper for process_all_coins_async.
+        Analyze the sentiment of a single text using combined approach.
         
         Args:
-            max_results_per_coin (int): Maximum number of tweets to retrieve per coin
-            days_back (int): Number of days to look back
-            output_dir (str): Directory to save results
+            text (str): Text to analyze
             
         Returns:
-            dict: Dictionary of coin symbols to sentiment DataFrames
+            dict: Sentiment scores and classification
         """
-        return asyncio.run(self.process_all_coins_async(
-            max_results_per_coin=max_results_per_coin,
-            days_back=days_back,
-            output_dir=output_dir
-        ))
-
+        if not isinstance(text, str) or not text.strip():
+            return {
+                "compound": 0,
+                "pos": 0,
+                "neg": 0,
+                "neu": 1,
+                "sentiment_class": 0,
+                "confidence": 0
+            }
+            
+        # Get VADER scores
+        vader_scores = self.vader.polarity_scores(text)
+        
+        # Use ML model if it's trained
+        if self.is_trained and self.vectorizer is not None and self.classifier is not None:
+            try:
+                # Preprocess text
+                processed_text = self.preprocess_text(text)
+                
+                # Transform to feature vector
+                features = self.vectorizer.transform([processed_text])
+                
+                # Predict sentiment class
+                sentiment_class = self.classifier.predict(features)[0]
+                
+                # Get confidence scores
+                confidence_scores = self.classifier.predict_proba(features)[0]
+                confidence = max(confidence_scores)
+                
+                # Combine VADER and ML model
+                # Adjust compound score based on ML prediction
+                if sentiment_class == 1:  # Positive
+                    compound_adjusted = (vader_scores['compound'] + confidence) / 2
+                elif sentiment_class == -1:  # Negative
+                    compound_adjusted = (vader_scores['compound'] - confidence) / 2
+                else:  # Neutral
+                    compound_adjusted = vader_scores['compound'] * 0.8  # Reduce intensity
+                
+                # Ensure in range [-1, 1]
+                compound_adjusted = max(min(compound_adjusted, 1.0), -1.0)
+                
+                return {
+                    "compound": compound_adjusted,
+                    "pos": vader_scores['pos'],
+                    "neg": vader_scores['neg'],
+                    "neu": vader_scores['neu'],
+                    "sentiment_class": sentiment_class,
+                    "confidence": confidence
+                }
+                
+            except Exception as e:
+                print(f"Error in ML sentiment analysis: {e}. Falling back to VADER.")
+                # Fall back to VADER
+                pass
+        
+        # If ML model not available or error occurred, use VADER classification
+        if vader_scores['compound'] >= 0.05:
+            sentiment_class = 1  # Positive
+        elif vader_scores['compound'] <= -0.05:
+            sentiment_class = -1  # Negative
+        else:
+            sentiment_class = 0  # Neutral
+            
+        return {
+            "compound": vader_scores['compound'],
+            "pos": vader_scores['pos'],
+            "neg": vader_scores['neg'],
+            "neu": vader_scores['neu'],
+            "sentiment_class": sentiment_class,
+            "confidence": max(vader_scores['pos'], vader_scores['neg'], vader_scores['neu'])
+        }
+    
+    def analyze_dataframe(self, df, text_column='text'):
+        """
+        Analyze sentiment for all texts in a DataFrame.
+        
+        Args:
+            df (pd.DataFrame): DataFrame with text data
+            text_column (str): Column containing text to analyze
+            
+        Returns:
+            pd.DataFrame: Original DataFrame with added sentiment columns
+        """
+        if df is None or df.empty or text_column not in df.columns:
+            print("Invalid DataFrame or text column not found")
+            return df
+            
+        # Create a copy to avoid modifying the original
+        result_df = df.copy()
+        
+        # Initialize columns
+        result_df['sentiment_compound'] = 0.0
+        result_df['sentiment_positive'] = 0.0
+        result_df['sentiment_negative'] = 0.0
+        result_df['sentiment_neutral'] = 0.0
+        result_df['sentiment_class'] = 0
+        result_df['sentiment_confidence'] = 0.0
+        
+        # Analyze each text
+        for i, row in tqdm(df.iterrows(), total=len(df), desc="Analyzing sentiment"):
+            text = row[text_column]
+            sentiment = self.analyze_text(text)
+            
+            result_df.at[i, 'sentiment_compound'] = sentiment['compound']
+            result_df.at[i, 'sentiment_positive'] = sentiment['pos']
+            result_df.at[i, 'sentiment_negative'] = sentiment['neg']
+            result_df.at[i, 'sentiment_neutral'] = sentiment['neu']
+            result_df.at[i, 'sentiment_class'] = sentiment['sentiment_class']
+            result_df.at[i, 'sentiment_confidence'] = sentiment['confidence']
+        
+        return result_df
+    
+    def calculate_sentiment_score(self, df, 
+                                weight_engagement=True,
+                                engagement_cols=['retweet_count', 'like_count', 'reply_count'],
+                                normalize=True):
+        """
+        Calculate an overall sentiment score (0-100) similar to Fear & Greed Index.
+        
+        Args:
+            df (pd.DataFrame): DataFrame with sentiment data
+            weight_engagement (bool): Whether to weight by engagement metrics
+            engagement_cols (list): Columns to use for engagement weighting
+            normalize (bool): Whether to normalize to 0-100 scale
+            
+        Returns:
+            float: Overall sentiment score (0-100)
+        """
+        if df is None or df.empty or 'sentiment_compound' not in df.columns:
+            return 50.0  # Default neutral score
+            
+        try:
+            if weight_engagement and all(col in df.columns for col in engagement_cols):
+                # Create engagement score (sum of all metrics + 1 to avoid zeros)
+                df['engagement'] = df[engagement_cols].sum(axis=1) + 1
+                
+                # Use log scale for more balanced weighting
+                df['log_engagement'] = np.log1p(df['engagement'])
+                
+                # Calculate weighted sentiment
+                weighted_sentiment = (df['sentiment_compound'] * df['log_engagement']).sum() / df['log_engagement'].sum()
+            else:
+                # Simple average
+                weighted_sentiment = df['sentiment_compound'].mean()
+                
+            # Convert from [-1, 1] to [0, 100] scale if requested
+            if normalize:
+                score = (weighted_sentiment + 1) * 50
+                # Ensure in range [0, 100]
+                score = max(min(score, 100), 0)
+            else:
+                score = weighted_sentiment
+                
+            return score
+            
+        except Exception as e:
+            print(f"Error calculating sentiment score: {e}")
+            return 50.0  # Default neutral score
+    
+    def get_market_sentiment_level(self, score):
+        """
+        Convert numerical sentiment score to sentiment level category.
+        
+        Args:
+            score (float): Sentiment score on 0-100 scale
+            
+        Returns:
+            str: Sentiment level category
+        """
+        if score >= 90:
+            return "Extreme Greed"
+        elif score >= 75:
+            return "Greed"
+        elif score >= 60:
+            return "Moderate Greed"
+        elif score >= 40:
+            return "Neutral"
+        elif score >= 25:
+            return "Moderate Fear"
+        elif score >= 10:
+            return "Fear"
+        else:
+            return "Extreme Fear"
+    
+    def analyze_twitter_trends(self, df, days_back=30):
+        """
+        Analyze sentiment trends over time for a cryptocurrency.
+        
+        Args:
+            df (pd.DataFrame): DataFrame with tweet data including dates and sentiment
+            days_back (int): Number of days to analyze
+            
+        Returns:
+            dict: Trend metrics and insights
+        """
+        if df is None or df.empty or 'date' not in df.columns:
+            return {"error": "Invalid data"}
+            
+        try:
+            # Ensure date is datetime
+            if not pd.api.types.is_datetime64_dtype(df['date']):
+                df['date'] = pd.to_datetime(df['date'])
+                
+            # Filter for requested time period
+            end_date = df['date'].max()
+            start_date = end_date - timedelta(days=days_back)
+            period_df = df[(df['date'] >= start_date) & (df['date'] <= end_date)]
+            
+            if period_df.empty:
+                return {"error": "No data in specified time period"}
+                
+            # Group by day
+            period_df['date_day'] = period_df['date'].dt.date
+            daily = period_df.groupby('date_day').agg({
+                'sentiment_compound': 'mean',
+                'sentiment_positive': 'mean',
+                'sentiment_negative': 'mean',
+                'sentiment_neutral': 'mean',
+                'date': 'count'  # Count as volume
+            }).reset_index()
+            
+            daily.rename(columns={'date': 'volume'}, inplace=True)
+            
+            # Calculate overall sentiment
+            overall_score = self.calculate_sentiment_score(period_df)
+            sentiment_level = self.get_market_sentiment_level(overall_score)
+            
+            # Calculate sentiment change
+            if len(daily) >= 2:
+                # First half vs second half
+                half_point = len(daily) // 2
+                first_half = daily.iloc[:half_point]
+                second_half = daily.iloc[half_point:]
+                
+                first_half_score = first_half['sentiment_compound'].mean()
+                second_half_score = second_half['sentiment_compound'].mean()
+                
+                trend_direction = "improving" if second_half_score > first_half_score else "deteriorating"
+                trend_strength = abs(second_half_score - first_half_score) * 100
+                
+                # Day-to-day momentum (average daily change)
+                daily['change'] = daily['sentiment_compound'].diff()
+                avg_momentum = daily['change'].mean()
+                
+                # Volatility (standard deviation of sentiment)
+                volatility = daily['sentiment_compound'].std()
+                
+            else:
+                trend_direction = "stable"
+                trend_strength = 0
+                avg_momentum = 0
+                volatility = 0
+            
+            # Volume trend
+            if len(daily) >= 2:
+                volume_change_pct = ((daily['volume'].iloc[-1] / daily['volume'].iloc[0]) - 1) * 100
+            else:
+                volume_change_pct = 0
+                
+            return {
+                "overall_score": overall_score,
+                "sentiment_level": sentiment_level,
+                "trend_direction": trend_direction,
+                "trend_strength": trend_strength,
+                "avg_momentum": avg_momentum,
+                "volatility": volatility,
+                "volume_change_pct": volume_change_pct,
+                "days_analyzed": len(daily),
+                "total_mentions": period_df.shape[0],
+                "period_start": start_date.strftime("%Y-%m-%d"),
+                "period_end": end_date.strftime("%Y-%m-%d"),
+                "daily_data": daily.to_dict(orient='records')
+            }
+            
+        except Exception as e:
+            print(f"Error analyzing trends: {e}")
+            import traceback
+            traceback.print_exc()
+            return {"error": str(e)}
 
 # Example usage
 if __name__ == "__main__":
-    # Define async test function
-    async def test_async():
-        analyzer = TwscrapeTwitterSentimentAnalyzer()
-        
-        # Optional: Add a Twitter account for better rate limits
-        # await analyzer.add_twitter_account("your_username", "your_password")
-        
-        # Get Bitcoin tweets
-        btc_tweets = await analyzer.get_crypto_sentiment_async('BTC', max_results=20)
-        
-        if not btc_tweets.empty:
-            print(f"Retrieved {len(btc_tweets)} tweets for BTC")
-            print(btc_tweets[['sentiment_score', 'text']].head())
-            
-            # Aggregate by day
-            daily_sentiment = analyzer.aggregate_daily_sentiment(btc_tweets)
-            print(daily_sentiment[['date', 'sentiment_score', 'tweet_volume']].head())
+    # Directory for storing trained models
+    model_dir = 'models/saved'
     
-    # Run the async test
-    asyncio.run(test_async())
+    # Initialize enhanced sentiment analyzer
+    analyzer = EnhancedSentimentAnalyzer(model_dir=model_dir)
+    
+    # Example text to analyze
+    example_texts = [
+        "Bitcoin is going to the moon! 🚀 Just bought more $BTC #bullish",
+        "Crypto markets crashing again. Lost 50% of my portfolio. This is terrible.",
+        "Ethereum transition to proof-of-stake could happen next month.",
+        "Not sure about this new altcoin, seems risky but might have potential."
+    ]
+    
+    print("Example Sentiment Analysis:")
+    for text in example_texts:
+        sentiment = analyzer.analyze_text(text)
+        print(f"\nText: {text}")
+        print(f"Compound Score: {sentiment['compound']:.3f}")
+        print(f"Classification: {sentiment['sentiment_class']} (Confidence: {sentiment['confidence']:.3f})")
+        print(f"Positive: {sentiment['pos']:.3f}, Negative: {sentiment['neg']:.3f}, Neutral: {sentiment['neu']:.3f}")
+        
+        # Convert to 0-100 score
+        score = (sentiment['compound'] + 1) * 50
+        level = analyzer.get_market_sentiment_level(score)
+        print(f"Sentiment Score (0-100): {score:.1f} - {level}")

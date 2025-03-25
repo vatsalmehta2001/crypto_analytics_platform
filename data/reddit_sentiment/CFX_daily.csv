@@ -1,0 +1,3 @@
+sentiment_compound,sentiment_positive,sentiment_negative,sentiment_neutral,total_score,post_volume,date
+0.905,0.151,0.121,0.728,2,2,2025-03-22
+0.7677,0.141,0.124,0.735,2,2,2025-03-24

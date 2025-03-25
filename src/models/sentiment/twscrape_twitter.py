@@ -3,11 +3,11 @@ import pandas as pd
 import numpy as np
 import time
 import os
-from nltk.sentiment.vader import SentimentIntensityAnalyzer
-import datetime
+from datetime import datetime, timedelta
 from tqdm import tqdm
 from twscrape import API, gather
 from twscrape.logger import set_log_level
+from nltk.sentiment.vader import SentimentIntensityAnalyzer
 
 
 class TwscrapeTwitterSentimentAnalyzer:
@@ -86,10 +86,6 @@ class TwscrapeTwitterSentimentAnalyzer:
                     'name': 'Polkadot',
                     'keywords': ['polkadot', 'dot']
                 },
-                "ICP": {
-                    'name': 'Internet Computer',
-                    'keywords': ['internet computer', 'icp', 'dfinity']
-                },
                 "LINK": {
                     'name': 'Chainlink',
                     'keywords': ['chainlink', 'link']
@@ -101,14 +97,6 @@ class TwscrapeTwitterSentimentAnalyzer:
                 "MATIC": {
                     'name': 'Polygon',
                     'keywords': ['polygon', 'matic']
-                },
-                "UNI": {
-                    'name': 'Uniswap',
-                    'keywords': ['uniswap', 'uni']
-                },
-                "SHIB": {
-                    'name': 'Shiba Inu',
-                    'keywords': ['shiba', 'shib']
                 }
             }
             
@@ -172,8 +160,8 @@ class TwscrapeTwitterSentimentAnalyzer:
         
         try:
             # Set time window
-            end_time = datetime.datetime.utcnow()
-            start_time = end_time - datetime.timedelta(days=days_back)
+            end_time = datetime.utcnow()
+            start_time = end_time - timedelta(days=days_back)
             
             # Format dates for Twitter search
             since_date = start_time.strftime('%Y-%m-%d')

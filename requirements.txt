@@ -8,6 +8,7 @@ matplotlib>=3.5.0
 seaborn>=0.11.0
 plotly>=5.5.0
 dash>=2.0.0
+dash-bootstrap-components>=1.0.0
 
 # NLP for sentiment analysis
 nltk>=3.6.0
@@ -27,8 +28,14 @@ tensorflow>=2.8.0
 # Twitter scraping
 snscrape>=0.6.2
 tweepy>=4.10.0  # Keep for compatibility
+twscrape>=0.5.0  # For Twitter scraping without API keys
+
+# Word cloud generation
+wordcloud>=1.8.0
 
 # Utilities
 tqdm>=4.62.0
 joblib>=1.1.0
 python-dateutil>=2.8.2
+asyncio>=3.4.3
+aiohttp>=3.8.0
